@@ -1,0 +1,32 @@
+# Reusable: lint the caller's own .github/ with actionlint + zizmor.
+# Both MIT, both seconds. zizmor is the one that catches unpinned actions,
+# template injection, and missing permissions blocks.
+name: workflow-lint
+
+on:
+  workflow_call:
+    inputs:
+      zizmor-min-severity:
+        type: string
+        default: "medium"
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: workflow-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: actionlint
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color
+      - uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
+        with:
+          min-severity: ${{ inputs.zizmor-min-severity }}
+          advanced-security: false

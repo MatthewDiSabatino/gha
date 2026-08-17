@@ -1,0 +1,141 @@
+# Reusable Python CI for the DiSabatino LLC estate.
+#
+# WHY THIS EXISTS (2026-08-17 CI/CD maturity plan, Phase 1b)
+# Six repos carried six hand-copied ci.yml files; 7 of 10 workflows had no
+# `permissions:`, 7 no `timeout-minutes`, 7 no `concurrency`, 0 SHA-pinned
+# actions. Every hardening block lives HERE once. Callers pass what differs.
+#
+# CONTRACT: the ruff RULE SET is pinned in each repo's ruff.toml/pyproject
+# (memory: pin the lint contract, not the version). This workflow runs
+# `ruff <ruff-args>` and does not choose rules.
+#
+# ENGINE: `engine: master` installs ai-gm-engine@master (surfaces "bump
+# ENGINE_REF" early); `engine: dockerfile` reads `ARG ENGINE_REF=` from the
+# caller's Dockerfile so CI tests the pin the image ships. The token goes
+# through git's url.insteadOf and never appears in a pip URL.
+name: python-ci
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        type: string
+        default: "3.12"
+      working-directory:
+        type: string
+        default: "."
+      install:
+        description: "Shell that installs the repo's own deps (after the engine step)."
+        type: string
+        required: true
+      ruff-args:
+        type: string
+        default: "check ."
+      test:
+        description: "Shell that runs the tests. Do NOT pipe to tail/head (masks exit code)."
+        type: string
+        required: true
+      engine:
+        description: "none | master | dockerfile"
+        type: string
+        default: "none"
+      dockerfile:
+        description: "Path (relative to working-directory) read when engine=dockerfile."
+        type: string
+        default: "Dockerfile"
+      cache-key-files:
+        description: "hashFiles() glob(s) for the pip cache key."
+        type: string
+        default: "**/requirements*.txt"
+      timeout-minutes:
+        type: number
+        default: 20
+      pre-test:
+        description: "Optional shell run after install, before tests (e.g. drift checks)."
+        type: string
+        default: ""
+    secrets:
+      ENGINE_READ_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-py${{ inputs.python-version }}-pip-${{ hashFiles(inputs.cache-key-files) }}
+          restore-keys: ${{ runner.os }}-py${{ inputs.python-version }}-pip-
+
+      - name: Install ai-gm-engine
+        if: inputs.engine != 'none'
+        env:
+          ENGINE_READ_TOKEN: ${{ secrets.ENGINE_READ_TOKEN }}
+          ENGINE_MODE: ${{ inputs.engine }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ENGINE_READ_TOKEN:-}" ]; then
+            echo "::error::ENGINE_READ_TOKEN is unset; ai-gm-engine is private and CI cannot honestly pass without it."
+            exit 1
+          fi
+          case "$ENGINE_MODE" in
+            master) ref="master" ;;
+            dockerfile)
+              ref="$(sed -n 's/^ARG ENGINE_REF=//p' "$DOCKERFILE" | head -1)"
+              if [ -z "$ref" ]; then
+                echo "::error::could not read ARG ENGINE_REF from $DOCKERFILE - the pin moved or the line changed shape"
+                exit 1
+              fi ;;
+            *) echo "::error::engine must be none|master|dockerfile, got '$ENGINE_MODE'"; exit 1 ;;
+          esac
+          echo "installing ai-gm-engine@$ref"
+          git config --global url."https://x-access-token:${ENGINE_READ_TOKEN}@github.com/".insteadOf "https://github.com/"
+          pip install --no-cache-dir "git+https://github.com/MatthewDiSabatino/ai-gm-engine.git@${ref}"
+          git config --global --unset url."https://x-access-token:${ENGINE_READ_TOKEN}@github.com/".insteadOf
+
+      - name: Install
+        env:
+          INSTALL: ${{ inputs.install }}
+        run: |
+          set -euo pipefail
+          eval "$INSTALL"
+
+      - name: Lint (ruff - contract pinned in the repo)
+        env:
+          RUFF_ARGS: ${{ inputs.ruff-args }}
+        run: |
+          set -euo pipefail
+          eval "ruff $RUFF_ARGS"
+
+      - name: Pre-test checks
+        if: inputs.pre-test != ''
+        env:
+          PRE: ${{ inputs.pre-test }}
+        run: |
+          set -euo pipefail
+          eval "$PRE"
+
+      - name: Test
+        env:
+          TEST: ${{ inputs.test }}
+        run: |
+          set -euo pipefail
+          eval "$TEST"
