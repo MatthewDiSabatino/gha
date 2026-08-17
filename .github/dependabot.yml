@@ -5,6 +5,10 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    # Supply-chain cooldown: a freshly cut action release waits 7 days before
+    # Dependabot proposes it (zizmor dependabot-cooldown).
+    cooldown:
+      default-days: 7
     groups:
       actions:
         patterns: ["*"]
