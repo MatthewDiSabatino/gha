@@ -109,7 +109,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Trivy (image)
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # 0.36.0
         with:
           image-ref: ${{ inputs.image }}@${{ steps.build.outputs.digest }}
           format: table
@@ -127,7 +127,7 @@ jobs:
           upload-artifact: true
           upload-release-assets: false
 
-      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         if: steps.opt.outputs.cosign == 'true'
 
       - name: Sign image (static key, no tlog)
