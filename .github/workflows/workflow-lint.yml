@@ -30,3 +30,8 @@ jobs:
         with:
           min-severity: ${{ inputs.zizmor-min-severity }}
           advanced-security: false
+          # Online audits (ref-confusion, impostor-commit, known-vulnerable-actions)
+          # need to read MatthewDiSabatino/gha refs, and the caller's GITHUB_TOKEN
+          # cannot see another private repo -> "no audit was performed". Offline
+          # keeps every static audit; Dependabot covers vulnerable-action bumps.
+          online-audits: false
