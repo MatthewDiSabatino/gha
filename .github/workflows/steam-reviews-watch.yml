@@ -45,7 +45,7 @@ jobs:
 
           window = int(os.environ["WINDOW_MINUTES"]) * 60
           now = int(time.time())
-          hook = os.environ.get("WEBHOOK", "")
+          hook = "".join(os.environ.get("WEBHOOK", "").split())
           posts, failed = [], False
           for appid in os.environ["APPIDS"].split():
               query = {"appid": int(appid), "filter": 1, "review_type": 2, "num_per_page": 100,
