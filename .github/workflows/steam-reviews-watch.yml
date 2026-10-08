@@ -1,0 +1,83 @@
+# steam-reviews-watch -- a new negative Steam review for Isentroth reaches Discord within about an
+# hour (ops round-up D4, 2026-10-07).
+#
+# Built on IUserReviewsService/GetAppReviews: Steam disables the store endpoint
+# (store.steampowered.com/appreviews/<appid>?json=1) on 2026-10-22. The publisher key is optional
+# and only raises the rate limit, so an hourly read needs none. Enum values were read off the live
+# endpoint on 2026-10-07: review_type 2 is negative, filter 1 is most recent first. date_range_start
+# is ignored outside the Helpful sort, so the window is applied to timestamp_created here.
+#
+# Each run reads the newest negatives and posts the ones created in the last 70 minutes, so a late
+# cron start still overlaps the previous window; a review can be posted twice, never skipped. The
+# job log carries counts only. Public minutes are free, which is why this lives here.
+name: steam-reviews-watch
+
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+    inputs:
+      window_minutes:
+        description: "post negatives created in this many minutes (a large value proves the path)"
+        required: false
+        default: "70"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: steam-reviews-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Read new negative reviews and post them
+        env:
+          APPIDS: "4927450 5156570"
+          WINDOW_MINUTES: ${{ inputs.window_minutes || '70' }}
+          WEBHOOK: ${{ secrets.REVIEWS_WEBHOOK_URL }}
+        shell: python
+        run: |
+          import json, os, sys, time, urllib.parse, urllib.request
+
+          window = int(os.environ["WINDOW_MINUTES"]) * 60
+          now = int(time.time())
+          hook = "".join(os.environ.get("WEBHOOK", "").split())
+          posts, failed = [], False
+          for appid in os.environ["APPIDS"].split():
+              query = {"appid": int(appid), "filter": 1, "review_type": 2, "num_per_page": 100,
+                       "languages": ["all"]}
+              url = ("https://api.steampowered.com/IUserReviewsService/GetAppReviews/v1/?input_json="
+                     + urllib.parse.quote(json.dumps(query)))
+              try:
+                  with urllib.request.urlopen(url, timeout=20) as r:
+                      resp = json.loads(r.read())["response"]
+              except Exception as exc:
+                  print("app %s: read failed: %s" % (appid, type(exc).__name__))
+                  failed = True
+                  continue
+              fresh = [rv for rv in resp.get("reviews") or []
+                       if now - int(rv.get("timestamp_created") or 0) <= window]
+              print("app %s: %s negative reviews in all, %d new in the window"
+                    % (appid, resp.get("total_matching"), len(fresh)))
+              for rv in fresh:
+                  author = rv.get("author") or {}
+                  hours = round(int(author.get("playtime_at_review") or 0) / 60.0, 1)
+                  text = " ".join(str(rv.get("review") or "").split())[:600]
+                  link = "https://steamcommunity.com/profiles/%s/recommended/%s/" % (author.get("steamid"), appid)
+                  posts.append("New negative Steam review, app %s, %s h played%s:\n> %s\n%s"
+                               % (appid, hours, ", refunded" if rv.get("refunded") else "", text, link))
+          if posts and not hook:
+              print("::error::REVIEWS_WEBHOOK_URL is not set, so %d review(s) were not posted" % len(posts))
+              sys.exit(1)
+          for body in posts[:5] + (["...and %d more new negative reviews" % (len(posts) - 5)] if len(posts) > 5 else []):
+              req = urllib.request.Request(hook, data=json.dumps({"content": body[:1900]}).encode(),
+                                           headers={"Content-Type": "application/json"}, method="POST")
+              with urllib.request.urlopen(req, timeout=20) as r:
+                  print("webhook: HTTP %d" % r.status)
+          if failed:
+              print("::error::a GetAppReviews read failed; see the lines above")
+              sys.exit(1)
