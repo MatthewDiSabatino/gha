@@ -60,6 +60,7 @@ jobs:
           WEBHOOK: ${{ secrets.PROD_ALERT_WEBHOOK_URL }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          WEBHOOK="$(printf '%s' "$WEBHOOK" | tr -d '[:space:]')"
           if [ -z "$WEBHOOK" ]; then
             echo "::error::PROD_ALERT_WEBHOOK_URL is not set, so nobody was told"
             exit 1
