@@ -109,7 +109,15 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # The scan ANNOTATES the deploy; it does not gate it. `Build and push`
+      # above carries `push: true`, so by the time Trivy runs the image is
+      # already in the registry and already tagged. A red here cannot keep it
+      # out; it can only hold the service on an older build of the same floating
+      # base. The verdict is re-raised as the final step of the job, so a
+      # vulnerable image still reds the run.
       - name: Trivy (image)
+        id: trivy
+        continue-on-error: true
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ inputs.image }}@${{ steps.build.outputs.digest }}
@@ -194,3 +202,20 @@ jobs:
           git tag -a "$t" -m "verified deploy of $SHA" "$SHA"
           git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "$t"
           echo "tagged $t"
+
+      # Re-raises the Trivy verdict AFTER the deploy chain has run. The scan is
+      # `continue-on-error` so a base-OS advisory cannot hold the redeploy, but
+      # the run must still go red: this step is the only thing that makes a
+      # vulnerable image visible, and a green run would be the same defect in
+      # the other direction. `always()` so it reports even when a step upstream
+      # of it failed for an unrelated reason.
+      - name: Image scan verdict
+        if: always() && steps.trivy.outcome == 'failure'
+        env:
+          # Through env, never interpolated into the script body: a `${{ }}` inside
+          # `run:` is substituted before the shell parses it, so an input containing
+          # shell metacharacters would execute here.
+          SEVERITY: ${{ inputs.trivy-severity }}
+        run: |
+          echo "::error::Trivy found fixable vulnerabilities at ${SEVERITY} in this image. The deploy was NOT blocked (see the Trivy step's table above for the CVEs). If they are base-OS advisories, they clear when the distro publishes the fix and the next build picks it up; if they are ours, fix them. This run is red on purpose."
+          exit 1
