@@ -1,0 +1,69 @@
+# prod-probe -- can the Isentroth gateway serve a turn? Checked every 10 minutes from a runner that
+# is always awake (ops round-up D2, 2026-10-07).
+#
+# /ready is /health plus one database round trip: 200 with "db": "ok", or 503 when the database
+# does not answer. Two probes a minute apart must both fail before anyone is paged, so one dropped
+# request is not an alarm. Both failing posts to the same Discord webhook the gateway's own alerts
+# use (secret PROD_ALERT_WEBHOOK_URL) and turns the run red.
+#
+# It lives in this public repo because public minutes are free: 144 runs a day would spend most of
+# a private repo's monthly plan (ops funnel-watch.yml sizes the same trade).
+#
+# Prove the alert path with workflow_dispatch and a url that cannot answer, for example the same
+# host with a path that does not exist.
+name: prod-probe
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "probe this URL instead of prod's /ready (to prove the alert path)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prod-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe /ready twice, a minute apart
+        id: probe
+        env:
+          OVERRIDE_URL: ${{ inputs.url }}
+          PROD_URL: https://gateway-prod-production-9130.up.railway.app/ready
+        run: |
+          url="${OVERRIDE_URL:-$PROD_URL}"
+          for i in 1 2; do
+            code="$(curl -s -o body.json -w '%{http_code}' --max-time 20 "$url" || true)"
+            echo "probe $i: HTTP ${code:-none}"
+            if [ "$code" = "200" ] && grep -Eq '"db": ?"ok"' body.json; then
+              echo "ready"
+              exit 0
+            fi
+            if [ "$i" = "1" ]; then sleep 60; fi
+          done
+          echo "::error::the gateway failed /ready twice, a minute apart"
+          exit 1
+
+      - name: Page the alert webhook
+        if: failure() && steps.probe.outcome == 'failure'
+        env:
+          WEBHOOK: ${{ secrets.PROD_ALERT_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          WEBHOOK="$(printf '%s' "$WEBHOOK" | tr -d '[:space:]')"
+          if [ -z "$WEBHOOK" ]; then
+            echo "::error::PROD_ALERT_WEBHOOK_URL is not set, so nobody was told"
+            exit 1
+          fi
+          body="$(printf '{"content": "Isentroth gateway: /ready failed twice, a minute apart. %s"}' "$RUN_URL")"
+          curl -s -o /dev/null -w 'webhook: HTTP %{http_code}\n' -X POST -H 'Content-Type: application/json' -d "$body" "$WEBHOOK"
