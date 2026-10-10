@@ -1,0 +1,70 @@
+# pr-autoupdate -- one step of a serial merge queue, for repos where GitHub's merge queue is not
+# offered (personal-account private repos). Among open PRs into `base` with auto-merge enabled, oldest
+# first: a PR with failing checks is skipped; a PR already current with `base` is the head of the
+# queue, so nothing else moves; the first PR that is behind is updated, which starts its CI, and
+# auto-merge lands it when green. Its merge pushes to `base` and runs this again for the next PR.
+#
+# The token must be one whose pushes start workflows (a fine-grained PAT with Contents and Pull
+# requests read/write on the calling repo): an update-branch made with GITHUB_TOKEN starts no CI,
+# so the PR would wait forever.
+#
+# Caller:
+#   on: { push: { branches: [main] }, pull_request: { types: [auto_merge_enabled] } }
+#   jobs: { autoupdate: { uses: MatthewDiSabatino/gha/.github/workflows/pr-autoupdate.yml@<sha>,
+#           with: { base: main }, secrets: { token: "${{ secrets.AUTOUPDATE_TOKEN }}" } } }
+name: pr-autoupdate
+
+on:
+  workflow_call:
+    inputs:
+      base:
+        description: "the protected branch PRs merge into"
+        type: string
+        default: main
+      dry_run:
+        description: "report the decision without updating any branch"
+        type: boolean
+        default: false
+    secrets:
+      token:
+        required: true
+
+permissions: {}
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Update the oldest auto-merge PR that is behind
+        env:
+          GH_TOKEN: ${{ secrets.token }}
+          REPO: ${{ github.repository }}
+          BASE: ${{ inputs.base }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          : "${REPO:?}" "${BASE:?}"
+          if [ -z "${GH_TOKEN:-}" ]; then echo "::error::GH_TOKEN is empty; the update would never trigger CI"; exit 1; fi
+          DRY_RUN="${DRY_RUN:-0}"
+          # An update issued right after a merge is a silent no-op until GitHub recomputes the base.
+          sleep "${SETTLE_SECONDS:-20}"
+          prs=$(gh pr list -R "$REPO" --base "$BASE" --state open --limit 100 \
+            --json number,createdAt,autoMergeRequest,isDraft \
+            --jq '[.[] | select(.autoMergeRequest != null and (.isDraft | not))] | sort_by(.createdAt) | .[].number')
+          if [ -z "$prs" ]; then echo "queue empty: no open auto-merge PR into $BASE"; exit 0; fi
+          for n in $prs; do
+            head=$(gh pr view "$n" -R "$REPO" --json headRefOid --jq .headRefOid)
+            failing=$(gh pr checks "$n" -R "$REPO" --json bucket --jq '[.[] | select(.bucket == "fail" or .bucket == "cancel")] | length' 2>/dev/null || echo 0)
+            behind=$(gh api "repos/$REPO/compare/$BASE...$head" --jq .behind_by)
+            if [ "$failing" != "0" ]; then echo "#$n: $failing failing check(s); skipped"; continue; fi
+            if [ "$behind" = "0" ]; then echo "#$n: current with $BASE; head of the queue, waiting on its checks"; exit 0; fi
+            if [ "$DRY_RUN" = "1" ]; then echo "#$n: $behind behind $BASE; would update (dry run)"; exit 0; fi
+            gh api -X PUT "repos/$REPO/pulls/$n/update-branch" -f expected_head_sha="$head" --silent
+            sleep "${VERIFY_SECONDS:-10}"
+            after=$(gh api "repos/$REPO/compare/$BASE...$(gh pr view "$n" -R "$REPO" --json headRefOid --jq .headRefOid)" --jq .behind_by)
+            if [ "$after" != "0" ]; then echo "::error::#$n is still $after behind after the update"; exit 1; fi
+            echo "#$n: updated from $behind behind to current; CI runs on the new head"
+            exit 0
+          done
+          echo "no updatable PR: every auto-merge PR is failing"
