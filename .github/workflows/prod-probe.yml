@@ -39,7 +39,7 @@ jobs:
         id: probe
         env:
           OVERRIDE_URL: ${{ inputs.url }}
-          PROD_URL: https://gateway-prod-production-9130.up.railway.app/ready
+          PROD_URL: https://api.isentroth.com/ready
         run: |
           url="${OVERRIDE_URL:-$PROD_URL}"
           for i in 1 2; do
